@@ -21,7 +21,7 @@ with st.sidebar:
     api_key = st.text_input("API Key", type="password")
     
     # Tùy chỉnh độ sâu tìm kiếm
-    search_k = st.slider("Độ sâu tìm kiếm (Số đoạn văn)", min_value=3, max_value=20, value=10)
+    search_k = st.slider("Độ sâu tìm kiếm (Số đoạn văn)", min_value=3, max_value=100, value=50)
 
 if "messages" not in st.session_state:
     st.session_state.messages = [{"role": "assistant", "content": "Chào bạn, tôi đã sẵn sàng tra cứu thông tin cho bạn."}]
@@ -87,3 +87,4 @@ if prompt := st.chat_input("Nhập câu hỏi..."):
                 
             except Exception as e:
                 st.error(f"Lỗi xử lý: {e}")
+
