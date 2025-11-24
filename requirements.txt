@@ -1,13 +1,20 @@
 streamlit
-langchain
-langchain-community
-langchain-core
+# --- Cài đúng phiên bản đã chạy OK ở Local ---
+langchain==0.3.7
+langchain-community==0.3.7
+langchain-core==0.3.19
+langchain-text-splitters==0.3.2
 langchain-openai
 langchain-google-genai
 langchain-huggingface
 langchain-chroma
-langchain-text-splitters
+
+# --- Database Vector ---
 chromadb
+# Thư viện này để sửa lỗi SQLite cũ trên Streamlit Cloud
+pysqlite3-binary 
+
+# --- Xử lý file ---
 pypdf
 pdf2image
 pytesseract
