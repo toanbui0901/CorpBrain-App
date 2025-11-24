@@ -1,27 +1,24 @@
 import os
 import sys
 import platform
+import streamlit as st
 
-# --- [FIX QUAN TRỌNG] SỬA LỖI CHROMA DB TRÊN STREAMLIT CLOUD ---
-# Đoạn code này BẮT BUỘC phải nằm trên cùng, trước khi import bất kỳ thư viện AI nào
+# --- FIX LỖI SQLITE (BẮT BUỘC Ở ĐẦU) ---
 if platform.system() != "Windows":
     try:
         __import__('pysqlite3')
         sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
     except ImportError:
         pass
-# ---------------------------------------------------------------
+# ---------------------------------------
 
 import tempfile
 import pandas as pd
 from datetime import datetime
-import streamlit as st
 
-# --- KHU VỰC IMPORT ---
 try:
     from langchain_openai import ChatOpenAI
-    from langchain_google_genai import ChatGoogleGenerativeAI
-    from langchain_huggingface import HuggingFaceEmbeddings
+    from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
     from langchain_chroma import Chroma
     from langchain_core.documents import Document
     from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -30,26 +27,24 @@ try:
     from pdf2image import convert_from_path
     import pytesseract
 except ImportError:
-    st.error("Thiếu thư viện! Hãy kiểm tra requirements.txt")
+    st.error("Thiếu thư viện! Kiểm tra requirements.txt")
     st.stop()
 
-# --- CẤU HÌNH ĐƯỜNG DẪN (TỰ ĐỘNG NHẬN DIỆN OS) ---
+# --- CẤU HÌNH ĐƯỜNG DẪN ---
 if platform.system() == "Windows":
-    # Đường dẫn máy cá nhân
     TESSERACT_PATH = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
     POPPLER_PATH = r"C:\Program Files\poppler-24.08.0\Library\bin"
     if os.path.exists(TESSERACT_PATH):
         pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
 else:
-    # Đường dẫn trên Cloud (Linux)
     TESSERACT_PATH = "tesseract"
-    POPPLER_PATH = None # Linux tự nhận diện
+    POPPLER_PATH = None
 
 DB_DIR = "vector_db"
 HISTORY_FILE = "file_history.csv"
 
+# --- HÀM HỖ TRỢ OCR ---
 def extract_text_with_ocr(file_path):
-    """Đọc file PDF, tự động chuyển sang OCR nếu là file scan"""
     text = ""
     try:
         reader = PdfReader(file_path)
@@ -58,17 +53,15 @@ def extract_text_with_ocr(file_path):
             if extracted: text += extracted + "\n"
     except: pass
 
-    # Logic phát hiện file scan
-    total_pages = len(reader.pages) if 'reader' in locals() and reader.pages else 1
-    if len(text) < 50 * total_pages:
-        st.toast("📷 Đang chạy OCR trên Cloud...", icon="☁️")
+    # Nếu ít chữ quá thì coi là file scan
+    if len(text) < 50:
+        st.toast("📷 Đang OCR trên Cloud...", icon="☁️")
         try:
-            # Trên Linux không cần truyền poppler_path nếu đã cài poppler-utils
             if platform.system() == "Windows":
-                images = convert_from_path(file_path, dpi=300, poppler_path=POPPLER_PATH)
+                images = convert_from_path(file_path, dpi=200, poppler_path=POPPLER_PATH) # Giảm DPI xuống 200 cho nhẹ RAM
             else:
-                images = convert_from_path(file_path, dpi=300)
-                
+                images = convert_from_path(file_path, dpi=200)
+            
             ocr_text = ""
             for img in images:
                 ocr_text += pytesseract.image_to_string(img, lang='vie+eng') + "\n"
@@ -77,12 +70,20 @@ def extract_text_with_ocr(file_path):
             return f"Lỗi OCR: {e}"
     return text
 
-def process_and_save(uploaded_file, meta_info):
-    """Xử lý file và lưu vào Vector DB"""
+# --- HÀM XỬ LÝ CHÍNH (SỬ DỤNG GOOGLE EMBEDDING) ---
+def process_and_save(uploaded_file, meta_info, api_key):
+    """
+    Cần truyền thêm api_key vào để embedding
+    """
+    if not api_key:
+        st.error("Cần nhập API Key để xử lý dữ liệu!")
+        return 0
+
     with tempfile.NamedTemporaryFile(delete=False, suffix=f".{uploaded_file.name.split('.')[-1]}") as tmp:
         tmp.write(uploaded_file.getbuffer())
         fpath = tmp.name
 
+    # Đọc file
     text = ""
     if uploaded_file.name.endswith('.pdf'):
         text = extract_text_with_ocr(fpath)
@@ -100,57 +101,49 @@ def process_and_save(uploaded_file, meta_info):
     if not text.strip(): return 0
 
     full_content = (
-        f"METADATA >> [Tên VB: {meta_info['doc_name']}] | [Bộ phận: {meta_info['department']}] | [Ngày HL: {meta_info['effective_date']}]\n"
-        f"NỘI DUNG VĂN BẢN:\n{text}"
+        f"METADATA >> [Tên: {meta_info['doc_name']}] | [Đơn vị: {meta_info['department']}] | [Ngày HL: {meta_info['effective_date']}]\n"
+        f"NỘI DUNG:\n{text}"
     )
     doc = Document(page_content=full_content, metadata=meta_info)
     
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=300)
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     splits = splitter.split_documents([doc])
 
-    emb_func = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
-    
-    # [QUAN TRỌNG] Reset DB nếu bị lỗi phiên bản cũ
+    # [THAY ĐỔI QUAN TRỌNG] Dùng Google Embedding thay vì HuggingFace (Tiết kiệm 500MB RAM)
     try:
-        vector_db = Chroma(persist_directory=DB_DIR, embedding_function=emb_func)
-    except Exception:
-        # Nếu DB cũ bị lỗi, thử xóa và tạo lại (hoặc bỏ qua lỗi để tạo mới)
-        import shutil
-        if os.path.exists(DB_DIR):
-            shutil.rmtree(DB_DIR)
-        vector_db = Chroma(persist_directory=DB_DIR, embedding_function=emb_func)
+        emb_func = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=api_key)
+        
+        # Reset DB nếu lỗi
+        try:
+            vector_db = Chroma(persist_directory=DB_DIR, embedding_function=emb_func)
+        except:
+            import shutil
+            if os.path.exists(DB_DIR): shutil.rmtree(DB_DIR)
+            vector_db = Chroma(persist_directory=DB_DIR, embedding_function=emb_func)
 
-    vector_db.add_documents(splits)
+        vector_db.add_documents(splits)
+    except Exception as e:
+        st.error(f"Lỗi Embedding (Kiểm tra API Key): {e}")
+        return 0
     
+    # Ghi log
     log_entry = {
         "File gốc": uploaded_file.name,
         "Tên văn bản": meta_info['doc_name'],
-        "Đơn vị": meta_info['department'],
-        "Ngày hiệu lực": str(meta_info['effective_date']),
-        "Thời gian nạp": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "Số đoạn": len(splits)
+        "Ngày nạp": datetime.now().strftime("%Y-%m-%d %H:%M")
     }
-    
     if os.path.exists(HISTORY_FILE):
         df_hist = pd.read_csv(HISTORY_FILE)
         df_hist = pd.concat([df_hist, pd.DataFrame([log_entry])], ignore_index=True)
     else:
         df_hist = pd.DataFrame([log_entry])
     df_hist.to_csv(HISTORY_FILE, index=False)
+    
     return len(splits)
 
 def get_llm(model_type, api_key):
     if model_type == "DeepSeek R1 (OpenRouter)":
-        return ChatOpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=api_key,
-            model="deepseek/deepseek-r1:free",
-            temperature=0.3
-        )
+        return ChatOpenAI(base_url="https://openrouter.ai/api/v1", api_key=api_key, model="deepseek/deepseek-r1:free", temperature=0.3)
     elif model_type == "Gemini 2.5 Flash":
-        return ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",
-            google_api_key=api_key,
-            temperature=0.1
-        )
+        return ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=api_key, temperature=0.1)
     return None
