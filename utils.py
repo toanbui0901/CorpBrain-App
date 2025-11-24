@@ -1,23 +1,21 @@
 import os
-import tempfile
-import pandas as pd
-from datetime import datetime
-import streamlit as st
 import sys
 import platform
 
-# --- FIX LỖI SQLITE CHO CHROMA DB TRÊN STREAMLIT CLOUD ---
-# Phải đặt đoạn này lên đầu file, trước khi import chromadb
-if platform.system() != "Windows": # Chỉ chạy fix này trên Linux (Cloud)
+# --- [FIX QUAN TRỌNG] SỬA LỖI CHROMA DB TRÊN STREAMLIT CLOUD ---
+# Đoạn code này BẮT BUỘC phải nằm trên cùng, trước khi import bất kỳ thư viện AI nào
+if platform.system() != "Windows":
     try:
         __import__('pysqlite3')
         sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
     except ImportError:
         pass
-# ---------------------------------------------------------
+# ---------------------------------------------------------------
 
 import tempfile
 import pandas as pd
+from datetime import datetime
+import streamlit as st
 
 # --- KHU VỰC IMPORT ---
 try:
@@ -32,19 +30,23 @@ try:
     from pdf2image import convert_from_path
     import pytesseract
 except ImportError:
-    st.error("Thiếu thư viện! Hãy chạy: pip install langchain-chroma langchain-huggingface langchain-google-genai langchain-openai")
+    st.error("Thiếu thư viện! Hãy kiểm tra requirements.txt")
     st.stop()
 
-# --- CẤU HÌNH HỆ THỐNG ---
-TESSERACT_PATH = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-POPPLER_PATH = r"C:\Program Files\poppler-24.08.0\Library\bin"
+# --- CẤU HÌNH ĐƯỜNG DẪN (TỰ ĐỘNG NHẬN DIỆN OS) ---
+if platform.system() == "Windows":
+    # Đường dẫn máy cá nhân
+    TESSERACT_PATH = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+    POPPLER_PATH = r"C:\Program Files\poppler-24.08.0\Library\bin"
+    if os.path.exists(TESSERACT_PATH):
+        pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
+else:
+    # Đường dẫn trên Cloud (Linux)
+    TESSERACT_PATH = "tesseract"
+    POPPLER_PATH = None # Linux tự nhận diện
 
 DB_DIR = "vector_db"
 HISTORY_FILE = "file_history.csv"
-
-# Cấu hình Tesseract
-if os.path.exists(TESSERACT_PATH):
-    pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
 
 def extract_text_with_ocr(file_path):
     """Đọc file PDF, tự động chuyển sang OCR nếu là file scan"""
@@ -59,11 +61,14 @@ def extract_text_with_ocr(file_path):
     # Logic phát hiện file scan
     total_pages = len(reader.pages) if 'reader' in locals() and reader.pages else 1
     if len(text) < 50 * total_pages:
-        st.toast("📷 Đang chạy OCR (Đọc ảnh)...", icon="⏳")
+        st.toast("📷 Đang chạy OCR trên Cloud...", icon="☁️")
         try:
-            if not os.path.exists(POPPLER_PATH):
-                return "Lỗi: Chưa cấu hình đúng đường dẫn Poppler."
-            images = convert_from_path(file_path, dpi=300, poppler_path=POPPLER_PATH)
+            # Trên Linux không cần truyền poppler_path nếu đã cài poppler-utils
+            if platform.system() == "Windows":
+                images = convert_from_path(file_path, dpi=300, poppler_path=POPPLER_PATH)
+            else:
+                images = convert_from_path(file_path, dpi=300)
+                
             ocr_text = ""
             for img in images:
                 ocr_text += pytesseract.image_to_string(img, lang='vie+eng') + "\n"
@@ -104,7 +109,17 @@ def process_and_save(uploaded_file, meta_info):
     splits = splitter.split_documents([doc])
 
     emb_func = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
-    vector_db = Chroma(persist_directory=DB_DIR, embedding_function=emb_func)
+    
+    # [QUAN TRỌNG] Reset DB nếu bị lỗi phiên bản cũ
+    try:
+        vector_db = Chroma(persist_directory=DB_DIR, embedding_function=emb_func)
+    except Exception:
+        # Nếu DB cũ bị lỗi, thử xóa và tạo lại (hoặc bỏ qua lỗi để tạo mới)
+        import shutil
+        if os.path.exists(DB_DIR):
+            shutil.rmtree(DB_DIR)
+        vector_db = Chroma(persist_directory=DB_DIR, embedding_function=emb_func)
+
     vector_db.add_documents(splits)
     
     log_entry = {
@@ -139,4 +154,3 @@ def get_llm(model_type, api_key):
             temperature=0.1
         )
     return None
-
