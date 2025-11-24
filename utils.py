@@ -3,6 +3,21 @@ import tempfile
 import pandas as pd
 from datetime import datetime
 import streamlit as st
+import sys
+import platform
+
+# --- FIX LỖI SQLITE CHO CHROMA DB TRÊN STREAMLIT CLOUD ---
+# Phải đặt đoạn này lên đầu file, trước khi import chromadb
+if platform.system() != "Windows": # Chỉ chạy fix này trên Linux (Cloud)
+    try:
+        __import__('pysqlite3')
+        sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+    except ImportError:
+        pass
+# ---------------------------------------------------------
+
+import tempfile
+import pandas as pd
 
 # --- KHU VỰC IMPORT ---
 try:
@@ -124,3 +139,4 @@ def get_llm(model_type, api_key):
             temperature=0.1
         )
     return None
+
